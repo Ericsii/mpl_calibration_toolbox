@@ -2,6 +2,7 @@
 #include <Checkerboard.hpp>
 #include <cv_bridge/cv_bridge.h>
 #include <geometry_msgs/PoseStamped.h>
+#include <numeric>
 #include <opencv2/core/eigen.hpp>
 #include <queue>
 #include <ros/ros.h>
@@ -201,7 +202,56 @@ int main(int argc, char ** argv) {
   Eigen::Vector3d t_vec;
   cv::cv2eigen(r_cam_body, r_mtx);
   cv::cv2eigen(t_cam_body, t_vec);
-  Eigen::Affine3d T = Eigen::Translation3d(t_vec) * r_mtx;
+  // Eigen::Affine3d T = Eigen::Translation3d(t_vec) * r_mtx;
+  Eigen::Affine3d T = Eigen::Affine3d::Identity();
+  T.matrix().block<3, 3>(0, 0) = r_mtx;
+  T.matrix().block<3, 1>(0, 3) = t_vec;
+
+  std::vector<Eigen::Affine3d> T_mocap_chessboard_vec;
+  for (size_t i = 0; i < mocap_rotation_vec.size(); ++i)
+  {
+    Eigen::Affine3d T_mocap_body = Eigen::Affine3d::Identity();
+    Eigen::Affine3d T_cam_chessboard = Eigen::Affine3d::Identity();
+    Eigen::Affine3d T_mocap_chessboard = Eigen::Affine3d::Identity();
+
+    Eigen::Matrix3d R_mocap_body, R_cam_body;
+    Eigen::Vector3d t_mocap_body, t_cam_body;
+
+    cv::cv2eigen(mocap_rotation_vec[i], R_mocap_body);
+    cv::cv2eigen(mocap_translation_vec[i], t_mocap_body);
+    cv::cv2eigen(cam_rotation_vec[i], R_cam_body);
+    cv::cv2eigen(cam_translation_vec[i], t_cam_body);
+
+    T_mocap_body.matrix().block<3, 3>(0, 0) = R_mocap_body;
+    T_mocap_body.matrix().block<3, 1>(0, 3) = t_mocap_body;
+    T_cam_chessboard.matrix().block<3, 3>(0, 0) = R_cam_body;
+    T_cam_chessboard.matrix().block<3, 1>(0, 3) = t_cam_body;
+
+    T_mocap_chessboard = T_mocap_body * T * T_cam_chessboard;
+    T_mocap_chessboard_vec.emplace_back(T_mocap_chessboard);
+  }
+  // Calculate average related pose error
+  std::vector<double> r_error, t_error;
+  for (size_t i = 0; i < mocap_rotation_vec.size(); ++i)
+  {
+    for (size_t j = i + 1; j < mocap_rotation_vec.size(); ++j)
+    {
+      auto T_i = T_mocap_chessboard_vec[i];
+      auto T_j = T_mocap_chessboard_vec[j];
+
+      auto T_ij = T_i.inverse() * T_j;
+      Eigen::AngleAxis r_vec = Eigen::AngleAxisd(T_ij.rotation());
+      Eigen::Vector3d t_vec = T_ij.translation();
+
+      r_error.emplace_back(r_vec.angle());
+      t_error.emplace_back(t_vec.norm());
+    }
+  }
+  double r_error_mean = std::accumulate(r_error.begin(), r_error.end(), 0.0) / r_error.size();
+  double t_error_mean = std::accumulate(t_error.begin(), t_error.end(), 0.0) / t_error.size();
+
+  std::cout << "Average rotation error: " << r_error_mean / M_PI * 180.0 << " deg" << std::endl;
+  std::cout << "Average translation error: " << t_error_mean << std::endl;
 
   // Output extrinsic results both on terminal and in yaml file.
   std::ofstream fout(ros::package::getPath("mpl_calibration_toolbox") + "/data/camera_mocap_extrinsic_results.yaml");
