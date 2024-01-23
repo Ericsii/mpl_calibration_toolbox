@@ -27,7 +27,6 @@ include_directories(
   include
   ${catkin_INCLUDE_DIRS}
   ${CERES_INCLUDE_DIRS}
-  ${Eigen_INCLUDE_DIRS}
   ${OpenCV_INCLUDE_DIRS}
 )
 
@@ -40,6 +39,6 @@ add_executable(image_publisher src/image_publisher.cpp)
 add_executable(joint_extrinsic_calibrator src/joint_extrinsic_calibrator.cpp)
 add_executable(handeye_calibrator src/handeye_calibrator.cpp)
 
-target_link_libraries(image_publisher ${catkin_LIBRARIES} ${OpenCV_LIBRARIES})
-target_link_libraries(joint_extrinsic_calibrator yaml-cpp ${catkin_LIBRARIES} ${CERES_LIBRARIES} ${Eigen_LIBRARIES} ${OpenCV_LIBRARIES})
-target_link_libraries(handeye_calibrator yaml-cpp ${catkin_LIBRARIES} ${Eigen_LIBRARIES} ${OpenCV_LIBRARIES})
+target_link_libraries(image_publisher ${catkin_LIBRARIES} ${OpenCV_LIBRARIES} Eigen3::Eigen)
+target_link_libraries(joint_extrinsic_calibrator yaml-cpp ${catkin_LIBRARIES} ${CERES_LIBRARIES} ${Eigen_LIBRARIES} ${OpenCV_LIBRARIES} Eigen3::Eigen)
+target_link_libraries(handeye_calibrator yaml-cpp ${catkin_LIBRARIES} ${Eigen_LIBRARIES} ${OpenCV_LIBRARIES} Eigen3::Eigen)
