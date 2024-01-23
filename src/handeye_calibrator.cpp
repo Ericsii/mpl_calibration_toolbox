@@ -21,6 +21,11 @@ void draw_axes(cv::Mat img, const cv::Mat corners, const cv::Mat imgpts) {
   cv::line(img, corner, point3, cv::Scalar(0, 0, 255), 3);
 }
 
+void calculate_related_error()
+{
+
+}
+
 int main(int argc, char ** argv) {
   ros::init(argc, argv, "handeye_calibrator");
   ros::NodeHandle nh;
@@ -79,6 +84,7 @@ int main(int argc, char ** argv) {
   std::queue<cv::Mat>                     img_queue;
   std::queue<std::pair<cv::Mat, cv::Mat>> gt_pose_queue;
   std::vector<cv::Mat> cam_rotation_vec, cam_translation_vec, mocap_rotation_vec, mocap_translation_vec;  // absolute pose
+  std::vector<cv::Mat> corners_vec;
   for (const rosbag::MessageInstance & msg : view) {
     if (!ros::ok()) break;
     if (msg.getTopic() == img_topic) {
@@ -128,7 +134,7 @@ int main(int argc, char ** argv) {
                        cv::TermCriteria(cv::TermCriteria::EPS + cv::TermCriteria::COUNT, 20, 0.01));
       cv::drawChessboardCorners(img, board.size(), corners, true);
       if (!cv::solvePnP(board.object_points(), corners, intrinsics.camera_matrix(), intrinsics.distortion_coefficients(), cam_r_vec,
-                        cam_t_vec, false)) {
+                        cam_t_vec, false, cv::SOLVEPNP_IPPE)) {
         ROS_WARN("%s", colorful_char::warning("Could not solve the PnP problem.").c_str());
         ++num_blurred_imgs;
         if (vis_on) {
@@ -180,6 +186,7 @@ int main(int argc, char ** argv) {
       cam_translation_vec.emplace_back(cam_t_vec);
       mocap_rotation_vec.emplace_back(mocap_rotation);
       mocap_translation_vec.emplace_back(mocap_translation);
+      corners_vec.emplace_back(corners);
     }
   }
   num_skipped_imgs = num_imgs - num_blurred_imgs - num_valid_imgs;
@@ -207,10 +214,11 @@ int main(int argc, char ** argv) {
   T.matrix().block<3, 3>(0, 0) = r_mtx;
   T.matrix().block<3, 1>(0, 3) = t_vec;
 
-  std::vector<Eigen::Affine3d> T_mocap_chessboard_vec;
+  std::vector<Eigen::Affine3d> T_mocap_cam_vec, T_mocap_chessboard_vec;
   for (size_t i = 0; i < mocap_rotation_vec.size(); ++i)
   {
     Eigen::Affine3d T_mocap_body = Eigen::Affine3d::Identity();
+    Eigen::Affine3d T_mocap_cam = Eigen::Affine3d::Identity();
     Eigen::Affine3d T_cam_chessboard = Eigen::Affine3d::Identity();
     Eigen::Affine3d T_mocap_chessboard = Eigen::Affine3d::Identity();
 
@@ -227,9 +235,59 @@ int main(int argc, char ** argv) {
     T_cam_chessboard.matrix().block<3, 3>(0, 0) = R_cam_body;
     T_cam_chessboard.matrix().block<3, 1>(0, 3) = t_cam_body;
 
-    T_mocap_chessboard = T_mocap_body * T * T_cam_chessboard;
+    T_mocap_cam = T_mocap_body * T;
+    T_mocap_chessboard = T_mocap_cam * T_cam_chessboard;
+    T_mocap_cam_vec.emplace_back(T_mocap_cam);
     T_mocap_chessboard_vec.emplace_back(T_mocap_chessboard);
   }
+
+  double total_mean_error = 0;
+  for (size_t i = 0; i < mocap_rotation_vec.size(); ++i)
+  {
+    const auto& corners = corners_vec[i];
+    double res_mean = 0;
+
+    for (size_t j = 0; j < mocap_rotation_vec.size(); ++j)
+    {
+      if (i == j)
+      {
+        continue;
+      }
+
+      const auto T_chessboardj_cami = T_mocap_cam_vec[i].inverse() * T_mocap_chessboard_vec[j];
+      Eigen::AngleAxisd Ervec = Eigen::AngleAxisd(T_chessboardj_cami.rotation());
+      Eigen::Vector3d tvec = T_chessboardj_cami.translation(), rvec = Ervec.axis() * Ervec.angle();
+      cv::Mat rvec_cv, tvec_cv;
+      cv::eigen2cv(rvec, rvec_cv);
+      cv::eigen2cv(tvec, tvec_cv);
+
+      cv::Mat image_points;
+      cv::projectPoints(
+        board.object_points(),
+        rvec_cv, tvec_cv,
+        intrinsics.camera_matrix(), intrinsics.distortion_coefficients(),
+        image_points);
+
+      double residual = 0;
+      for (size_t idx = 0; idx < board.object_points().size(); ++idx) {
+        double dx = corners.at<cv::Point2f>(idx, 0).x - image_points.at<cv::Point2d>(idx, 0).x;
+        double dy = corners.at<cv::Point2f>(idx, 0).y - image_points.at<cv::Point2d>(idx, 0).y;
+        residual += std::sqrt(dx * dx + dy * dy);
+      }
+      residual /= board.object_points().size();
+
+      res_mean += residual;
+    }
+
+    res_mean /= mocap_rotation_vec.size() - 1;
+
+    std::cout << "Reprojection error for image " << i << " : " << res_mean << std::endl;
+
+    total_mean_error += res_mean;
+  }
+  total_mean_error /= mocap_rotation_vec.size();
+  std::cout << "Average reprojection error: " << total_mean_error << std::endl;
+
   // Calculate average related pose error
   std::vector<double> r_error, t_error;
   for (size_t i = 0; i < mocap_rotation_vec.size(); ++i)
@@ -250,7 +308,7 @@ int main(int argc, char ** argv) {
   double r_error_mean = std::accumulate(r_error.begin(), r_error.end(), 0.0) / r_error.size();
   double t_error_mean = std::accumulate(t_error.begin(), t_error.end(), 0.0) / t_error.size();
 
-  std::cout << "Average rotation error: " << r_error_mean / M_PI * 180.0 << " deg" << std::endl;
+  std::cout << "Average rotation error(deg): " << r_error_mean / M_PI * 180.0 << std::endl;
   std::cout << "Average translation error: " << t_error_mean << std::endl;
 
   // Output extrinsic results both on terminal and in yaml file.
